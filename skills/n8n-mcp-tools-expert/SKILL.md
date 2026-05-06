@@ -573,9 +573,11 @@ n8n_manage_datatable({
 
 ### n8n_manage_credentials
 
-Unified tool for managing n8n credentials. Supports full CRUD operations and schema discovery.
+Unified tool for managing n8n credentials. Supports full CRUD operations, schema discovery, and reverse-lookup of which workflows use each credential.
 
 **Actions**: `list`, `get`, `create`, `update`, `delete`, `getSchema`
+
+**Optional flag**: `includeUsage` (boolean, default `false`) — on `list` and `get`, attaches a `usedIn: [{id, name, active}]` array and `usageCount` to every credential by reverse-scanning workflows. Default behavior is unchanged when omitted.
 
 ```javascript
 // List all credentials
@@ -587,7 +589,7 @@ n8n_manage_credentials({action: "get", id: "123"})
 // → Returns: credential metadata (data field stripped for security)
 
 // Discover required fields for a credential type
-n8n_manage_credentials({action: "getSchema", credentialType: "httpHeaderAuth"})
+n8n_manage_credentials({action: "getSchema", type: "httpHeaderAuth"})
 // → Returns: required fields, types, descriptions
 
 // Create credential
@@ -609,7 +611,29 @@ n8n_manage_credentials({
 
 // Delete credential
 n8n_manage_credentials({action: "delete", id: "123"})
+
+// List credentials WITH the workflows that reference each one
+n8n_manage_credentials({action: "list", includeUsage: true})
+// → Each credential gains: usedIn: [{id, name, active}], usageCount: N
+//   Response may include usageScanError if the workflow scan failed
+//   (base credential list still returned in that case)
+
+// Get one credential and the workflows that reference it
+n8n_manage_credentials({action: "get", id: "123", includeUsage: true})
+// → Adds usedIn and usageCount; on scan failure, response sets
+//   usageScanError and omits usedIn/usageCount
 ```
+
+**When to use `includeUsage`**:
+- Pre-deletion safety check: confirm a credential isn't referenced before `delete`
+- Credential rotation impact analysis: list affected workflows before updating secrets
+- Remediating findings from `n8n_audit_instance` (e.g., shared/over-privileged credentials)
+
+**`includeUsage` caveats**:
+- Triggers a full workflow scan client-side (n8n's API has no native lookup) — slower on large instances, especially when scanning hundreds of workflows
+- Capped at 5000 workflows (same ceiling as `n8n_audit_instance`); archived workflows are excluded by n8n
+- A "no usages" result does **not** guarantee the credential is unused — verify before destructive actions
+- On scan failure the response degrades gracefully: base credentials are returned with a `usageScanError` field rather than failing the whole call
 
 **Security**:
 - `get`, `create`, and `update` responses strip the `data` field (defense-in-depth)
@@ -620,6 +644,7 @@ n8n_manage_credentials({action: "delete", id: "123"})
 - Use `getSchema` before `create` to discover required fields for a credential type
 - The `data` field contains the actual secret values — provide it only on create/update
 - Always verify credential creation by listing afterward
+- Before `delete`, run `get` with `includeUsage: true` to see what breaks
 
 ---
 

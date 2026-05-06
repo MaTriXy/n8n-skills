@@ -538,6 +538,8 @@ n8n_test_workflow({
 5. `delete` - Permanently delete credential by ID
 6. `getSchema` - Discover required fields for a credential type
 
+`list` and `get` also accept an optional `includeUsage: true` flag that attaches workflow-usage info to each credential (see "Find Which Workflows Use a Credential" below).
+
 ### List Credentials
 ```javascript
 n8n_manage_credentials({action: "list"})
@@ -551,11 +553,54 @@ n8n_manage_credentials({action: "get", id: "123"})
 // Falls back to list+filter if GET returns 403/405
 ```
 
+### Find Which Workflows Use a Credential
+n8n's public API has no native "which workflows use credential X" endpoint, so n8n-mcp builds the reverse index for you by scanning workflows client-side. Pass `includeUsage: true` to either `list` or `get`.
+
+```javascript
+// Every credential, with the workflows that reference it
+n8n_manage_credentials({action: "list", includeUsage: true})
+// → {
+//     credentials: [
+//       {
+//         id: "123",
+//         name: "Production Slack",
+//         type: "slackApi",
+//         createdAt: "...", updatedAt: "...",
+//         usedIn: [
+//           {id: "wf_abc", name: "Daily digest",  active: true},
+//           {id: "wf_xyz", name: "Alert fan-out", active: false}
+//         ],
+//         usageCount: 2
+//       },
+//       ...
+//     ],
+//     count: N,
+//     // usageScanError: "..."  // present only if the workflow scan failed
+//   }
+
+// One credential, with its workflow references
+n8n_manage_credentials({action: "get", id: "123", includeUsage: true})
+// → Same shape as `get` plus usedIn and usageCount.
+//   On scan failure: response sets usageScanError and omits usedIn/usageCount.
+```
+
+**When to use it:**
+- Before `delete`: confirm nothing references the credential
+- Before rotating a secret with `update`: see exactly which workflows you'll affect
+- After `n8n_audit_instance` flags a credential: locate the workflows that need remediation
+
+**Behavior and limits:**
+- The reverse index is built client-side, deduplicated per workflow, and capped at 5000 workflows (same ceiling as `n8n_audit_instance`)
+- Archived workflows are excluded by n8n's API — a "no usages" result does **not** prove a credential is unused; verify before destructive actions
+- Triggers one full workflow scan per call. On large instances expect slower responses than the base ~50–500ms — budget accordingly when calling repeatedly
+- If the scan fails, the response degrades to base credentials with a `usageScanError` field rather than failing the whole call
+- Default behavior unchanged: omit the flag and no extra API calls happen
+
 ### Discover Schema
 ```javascript
 n8n_manage_credentials({
   action: "getSchema",
-  credentialType: "httpHeaderAuth"
+  type: "httpHeaderAuth"
 })
 // → Required fields, types, descriptions for this credential type
 ```
@@ -593,7 +638,7 @@ n8n_manage_credentials({action: "delete", id: "123"})
 // 1. Discover what fields are needed
 n8n_manage_credentials({
   action: "getSchema",
-  credentialType: "slackApi"
+  type: "slackApi"
 })
 
 // 2. Create the credential
@@ -608,10 +653,28 @@ n8n_manage_credentials({
 n8n_manage_credentials({action: "list"})
 ```
 
+### Typical Workflow: Safely Delete or Rotate a Credential
+```javascript
+// 1. Check what would break
+n8n_manage_credentials({action: "get", id: "123", includeUsage: true})
+// → Inspect usedIn — the {id, name, active} of every workflow that references it
+
+// 2a. If nothing depends on it, delete
+n8n_manage_credentials({action: "delete", id: "123"})
+
+// 2b. If something does, rotate the secret instead and notify owners
+n8n_manage_credentials({
+  action: "update",
+  id: "123",
+  data: {accessToken: "xoxb-new-..."}
+})
+```
+
 ### Security Notes
 - **Response stripping**: `get`, `create`, and `update` all strip the `data` field from responses (defense-in-depth — secrets are never returned)
 - **Log redaction**: Credential request bodies are redacted from debug logs
 - **Fallback resilience**: `get` falls back to list+filter when `GET /credentials/:id` returns 403/405 (endpoint not in all n8n versions)
+- **Usage scan resilience**: when `includeUsage: true` triggers a workflow scan that fails, the response includes `usageScanError` and still returns the base credentials rather than erroring out
 
 ---
 
